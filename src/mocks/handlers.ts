@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 import type { Booking, BookingInput } from "../features/bookings/types.ts";
-import { isValidDate } from "../features/bookings/time.ts";
+import { intervalsOverlap, isValidDate, toMinutes } from "../features/bookings/time.ts";
 import { validateBooking } from "../features/bookings/validation.ts";
 import type { BookingValidationError } from "../features/bookings/validation.ts";
 import type { BookingStore } from "./bookings-store.ts";
@@ -75,7 +75,15 @@ export function createBookingHandlers({
     }
 
     function simulateConflict(input: BookingInput) {
-        // Consume only after JSON, fields and booking rules have passed validation.
+        if (!scenarios.getConflictOnNextSave()) return;
+        const start = toMinutes(input.start);
+        const end = toMinutes(input.end);
+        // Unlike PATCH validation, demo insertion must also respect the booking being edited.
+        const occupied = store.list().some((booking) => booking.date === input.date
+            && intervalsOverlap(start, end, toMinutes(booking.start), toMinutes(booking.end)));
+        if (occupied) return;
+
+        // Consume only after validation and when the entire requested interval is free.
         if (!scenarios.consumeConflict()) return;
         store.save({
             id: crypto.randomUUID(),
