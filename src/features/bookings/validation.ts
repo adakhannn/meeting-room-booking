@@ -1,4 +1,4 @@
-import { intervalsOverlap, toMinutes } from "./time.ts";
+import { intervalsOverlap, isValidDate, toMinutes } from "./time.ts";
 import type { Booking, BookingInput } from "./types.ts";
 
 export type BookingValidationErrorCode =
@@ -35,13 +35,7 @@ export function validateBooking(
     excludeBookingId?: Booking["id"],
 ): BookingValidationResult {
     const date = new Date(`${input.date}T00:00:00`);
-    if (
-        !/^\d{4}-\d{2}-\d{2}$/.test(input.date) ||
-        Number.isNaN(date.getTime()) ||
-        date.getFullYear() !== Number(input.date.slice(0, 4)) ||
-        date.getMonth() + 1 !== Number(input.date.slice(5, 7)) ||
-        date.getDate() !== Number(input.date.slice(8, 10))
-    ) {
+    if (!isValidDate(input.date)) {
         return {
             valid: false,
             field: "date",
