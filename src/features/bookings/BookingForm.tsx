@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { BookingApiError } from "./api.ts";
 import type { Booking, BookingInput } from "./types.ts";
-import { formatLocalDate, isValidDate } from "./time.ts";
-import { validateBooking } from "./validation.ts";
+import { formatLocalDate, isValidDate, toMinutes } from "./time.ts";
+import { MIN_DURATION, WORKDAY_END, WORKDAY_START, validateBooking } from "./validation.ts";
 
 type BookingFormProps = {
     date: string;
@@ -19,13 +19,25 @@ type BookingFormProps = {
 
 const inputClassName = "block min-h-12 w-full min-w-0 rounded-lg border border-input bg-white px-3 py-2.5 text-sm transition-colors placeholder:text-muted hover:border-accent focus-visible:border-accent focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-focus aria-invalid:border-error";
 
+function earliestStart(date: string, now: Date) {
+    if (date !== formatLocalDate(now)) return WORKDAY_START;
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    return Math.max(WORKDAY_START, minutes + (now.getSeconds() || now.getMilliseconds() ? 1 : 0));
+}
+
+function timeValue(minutes: number) {
+    return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
 export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDeleting, booking, onSave, onCancel }: BookingFormProps) {
     const isBusy = isSaving || isDeleting;
-    const [today, setToday] = useState(() => formatLocalDate(new Date()));
+    const [clock, setClock] = useState(() => new Date());
+    const today = formatLocalDate(clock);
     const requestInFlight = useRef(false);
-    const { register, setValue, setFocus, handleSubmit, setError, clearErrors, reset, formState: { errors, isSubmitting } } = useForm<BookingInput>({
+    const { register, control, setValue, setFocus, handleSubmit, setError, clearErrors, reset, formState: { errors, isSubmitting } } = useForm<BookingInput>({
         defaultValues: { date, title: booking?.title ?? "", start: booking?.start ?? "", end: booking?.end ?? "" },
     });
+    const [start, end] = useWatch({ control, name: ["start", "end"] });
 
     useEffect(() => {
         if (booking?.id) setFocus("title");
@@ -37,31 +49,49 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
     }, [date, setValue, clearErrors]);
 
     useEffect(() => {
-        const updateToday = () => setToday(formatLocalDate(new Date()));
-        const timer = window.setInterval(updateToday, 60_000);
-        window.addEventListener("focus", updateToday);
+        const updateClock = () => setClock(new Date());
+        const onVisibilityChange = () => {
+            if (document.visibilityState === "visible") updateClock();
+        };
+        const timer = window.setInterval(updateClock, 1_000);
+        window.addEventListener("focus", updateClock);
+        document.addEventListener("visibilitychange", onVisibilityChange);
         return () => {
             window.clearInterval(timer);
-            window.removeEventListener("focus", updateToday);
+            window.removeEventListener("focus", updateClock);
+            document.removeEventListener("visibilitychange", onVisibilityChange);
         };
     }, []);
 
     const validDate = isValidDate(date);
     const pastDate = validDate && date < today;
+    const earliest = earliestStart(date, clock);
+    const latest = WORKDAY_END - MIN_DURATION;
+    const noTimeLeft = date === today && earliest > latest;
+    // Avoid min > max: time inputs interpret that as a range crossing midnight.
+    // When today is closed, time inputs are disabled and retain their values.
+    const startMin = Math.min(earliest, latest);
+    const endMinutes = toMinutes(end);
+    const startMinutes = toMinutes(start);
+    const startMax = Math.max(startMin, Math.min(latest, Number.isFinite(endMinutes) ? endMinutes - MIN_DURATION : latest));
+    const endMin = Math.min(WORKDAY_END, Math.max(startMin, Number.isFinite(startMinutes) ? startMinutes : startMin) + MIN_DURATION);
+    const noTimeLeftMessage = "Сегодня уже нельзя разместить бронирование на 30 минут. Выберите другой день.";
     const pastDateMessage = booking
         ? "Нельзя сохранить бронирование на прошедшую дату."
         : "На прошедшую дату нельзя создать бронирование.";
     const blockedReason = isDeleting
         ? "Дождитесь завершения удаления."
         : !validDate
-        ? "Выберите дату для бронирования."
-        : pastDate
-          ? pastDateMessage
-          : isError
-            ? "Бронирование недоступно: не удалось загрузить список. Повторите запрос."
-            : isLoading || bookings === undefined
-              ? "Дождитесь загрузки списка бронирований."
-              : undefined;
+            ? "Выберите дату для бронирования."
+            : pastDate
+                ? pastDateMessage
+                : noTimeLeft
+                    ? noTimeLeftMessage
+                    : isError
+                        ? "Бронирование недоступно: не удалось загрузить список. Повторите запрос."
+                        : isLoading || bookings === undefined
+                            ? "Дождитесь загрузки списка бронирований."
+                            : undefined;
 
     // Keep server conflicts distinct from local validation, and only claim a refresh
     // succeeded when the list is available. This also updates after a manual retry.
@@ -75,7 +105,7 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
 
     async function onSubmit(values: BookingInput) {
         const now = new Date();
-        setToday(formatLocalDate(now));
+        setClock(now);
         // Guard the submit handler as well as the button (e.g. submission with Enter).
         if (requestInFlight.current || isBusy || !validDate || isLoading || isError || bookings === undefined) return;
         clearErrors();
@@ -83,6 +113,7 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
             setError("date", { type: "past_time", message: pastDateMessage });
             return;
         }
+        if (earliestStart(date, now) > WORKDAY_END - MIN_DURATION) return;
 
         const result = validateBooking({ ...values, date }, bookings, now, booking?.id);
         if (result.valid === false) {
@@ -148,7 +179,10 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
                         <input
                             id="booking-start"
                             type="time"
-                            disabled={isBusy}
+                            min={timeValue(startMin)}
+                            max={timeValue(startMax)}
+                            step={60}
+                            disabled={isBusy || noTimeLeft}
                             className={inputClassName}
                             aria-invalid={Boolean(errors.start)}
                             aria-describedby={errors.start ? "booking-start-error" : undefined}
@@ -161,7 +195,10 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
                         <input
                             id="booking-end"
                             type="time"
-                            disabled={isBusy}
+                            min={timeValue(endMin)}
+                            max={timeValue(WORKDAY_END)}
+                            step={60}
+                            disabled={isBusy || noTimeLeft}
                             className={inputClassName}
                             aria-invalid={Boolean(errors.end)}
                             aria-describedby={errors.end ? "booking-end-error" : undefined}

@@ -21,9 +21,9 @@ export type BookingValidationResult =
     | { valid: true }
     | ({ valid: false } & BookingValidationError);
 
-const WORKDAY_START = 9 * 60;
-const WORKDAY_END = 18 * 60;
-const MIN_DURATION = 30;
+export const WORKDAY_START = 9 * 60;
+export const WORKDAY_END = 18 * 60;
+export const MIN_DURATION = 30;
 const MAX_DURATION = 120;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
