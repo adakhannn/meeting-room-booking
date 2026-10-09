@@ -1,5 +1,7 @@
+import { BookingsPage } from './features/bookings/BookingsPage.tsx'
+
 function App() {
-  return <h1>Бронирование переговорной</h1>
+  return <BookingsPage />
 }
 
 export default App
