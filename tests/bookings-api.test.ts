@@ -71,17 +71,52 @@ test("invalid requests and existing conflicts do not consume the demo scenario o
     expect(await list()).toEqual([expect.objectContaining({ ...input, title: "Бронь другого участника" })]);
 });
 
-test("demo PATCH validates merged fields, preserves the original booking and adds the other booking once", async () => {
+test.each([
+    { start: "10:00", end: "11:00" },
+    { start: "09:30", end: "10:30" },
+    { start: "10:30", end: "11:30" },
+])("demo PATCH saves normally when %j overlaps its original interval and keeps the scenario armed", async (interval) => {
     const scenarios = createDemoScenarios();
     server.resetHandlers(...createBookingHandlers({ store, baseUrl, now: () => now, scenarios }));
     const original = await create();
     scenarios.setConflictOnNextSave(true);
-    const response = await write("PATCH", { start: "11:15", end: "11:45" }, original.id);
-    expect(response.status).toBe(409);
-    expect(store.get(original.id)).toEqual(original);
+
+    const changes = { ...interval, title: "Обновлённая встреча" };
+    const response = await write("PATCH", changes, original.id);
+    const updated = { ...original, ...changes };
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(updated);
+    expect(store.list()).toEqual([updated]);
+    expect(await list()).toEqual([updated]);
+    expect(scenarios.getConflictOnNextSave()).toBe(true);
+
+    // A later move to a free interval still triggers the armed one-shot scenario.
+    const conflict = await write("PATCH", { start: "12:00", end: "13:00" }, original.id);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "conflict", field: "start" });
     expect(await list()).toEqual([
+        updated,
+        expect.objectContaining({ date: original.date, start: "12:00", end: "13:00", title: "Бронь другого участника" }),
+    ]);
+    expect(scenarios.getConflictOnNextSave()).toBe(false);
+});
+
+test.each([
+    { date: input.date, start: "11:15", end: "11:45" },
+    { date: input.date, start: "11:00", end: "11:30" },
+    { date: "2026-10-11", start: "10:00", end: "11:00" },
+])("demo PATCH to free time %j preserves the original booking and adds the other booking once", async (interval) => {
+    const scenarios = createDemoScenarios();
+    server.resetHandlers(...createBookingHandlers({ store, baseUrl, now: () => now, scenarios }));
+    const original = await create();
+    scenarios.setConflictOnNextSave(true);
+    const response = await write("PATCH", interval, original.id);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "conflict", field: "start" });
+    expect(store.get(original.id)).toEqual(original);
+    expect(store.list()).toEqual([
         original,
-        expect.objectContaining({ date: original.date, start: "11:15", end: "11:45", title: "Бронь другого участника" }),
+        expect.objectContaining({ ...interval, title: "Бронь другого участника" }),
     ]);
     expect(scenarios.getConflictOnNextSave()).toBe(false);
     expect((await write("PATCH", { title: "Обновлено" }, original.id)).status).toBe(200);

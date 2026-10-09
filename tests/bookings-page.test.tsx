@@ -467,11 +467,52 @@ test("a failed list refresh after successful POST does not report a save failure
     expect(writeRequests).toEqual(["POST"]);
     expect((screen.getByLabelText("Дата") as HTMLInputElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Забронировать" }) as HTMLButtonElement).disabled).toBe(true);
+    const created = store.list().find((booking) => booking.title === "Встреча команды")!;
+    expect(client.getQueryData(["bookings", early.date])).toEqual([early, created, late]);
+    expect(screen.getAllByRole("listitem").map((row) => row.textContent)).toEqual([
+        "09:00 — 10:00ПланированиеРедактироватьУдалить",
+        "10:15 — 10:45Встреча командыРедактироватьУдалить",
+        "14:00 — 15:00Без названияРедактироватьУдалить",
+    ]);
+    editBooking("Встреча команды");
+    expect(formValues()).toEqual({ date: early.date, title: created.title, start: created.start, end: created.end });
+    expect(screen.getByRole("alert").textContent).toContain("Не удалось обновить список бронирований.");
+    expect(readDates).toEqual([early.date, early.date]);
     server.resetHandlers(...createBookingHandlers({ store, now: () => now, baseUrl: "http://localhost" }));
     fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
-    await screen.findByText("Встреча команды");
-    expect(screen.queryByRole("alert")).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(client.getQueryData(["bookings", early.date])).toEqual([early, created, late]);
     expect(writeRequests).toEqual(["POST"]);
+});
+
+test("POST uses the server response without duplicating an ID already cached before confirmation, even if GET fails", async () => {
+    let resolveSave!: () => void;
+    const pendingSave = new Promise<void>((done) => { resolveSave = done; });
+    const confirmed = { id: "created", date: early.date, start: "10:15", end: "11:15", title: "Название с сервера" };
+    server.use(http.post(endpoint, async () => {
+        await pendingSave;
+        store.save(confirmed);
+        return HttpResponse.json(confirmed, { status: 201 });
+    }));
+    showPage();
+    await screen.findByText("Планирование");
+    fillForm("10:15", "10:45", "Отправленное название");
+    await submitForm();
+    await waitFor(() => expect(writeRequests).toEqual(["POST"]));
+    // A concurrent cache refresh may have already included the created ID.
+    act(() => {
+        client.setQueryData(["bookings", early.date], [early, { ...confirmed, title: "Старая версия", end: "10:45" }, late]);
+    });
+    server.use(http.get(endpoint, () => new HttpResponse(null, { status: 503 })));
+    resolveSave();
+    await screen.findByRole("alert");
+    await waitFor(() => expect(formValues().title).toBe(""));
+    expect(client.getQueryData(["bookings", early.date])).toEqual([early, confirmed, late]);
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.queryByText("Старая версия")).toBeNull();
+    editBooking(confirmed.title);
+    expect(formValues()).toEqual({ date: confirmed.date, title: confirmed.title, start: confirmed.start, end: confirmed.end });
+    expect(screen.getByRole("alert").textContent).toContain("Не удалось обновить список бронирований.");
 });
 
 function editBooking(title = "Планирование") {
@@ -701,6 +742,17 @@ test("successful PATCH exits editing even if the following list refresh fails", 
     expect(formValues()).toEqual({ date: early.date, title: "", start: "", end: "" });
     expect(store.get(early.id)?.title).toBe("Сохранённые изменения");
     expect(writeRequests).toEqual(["PATCH"]);
+    const updated = { ...early, start: "10:15", end: "10:45", title: "Сохранённые изменения" };
+    expect(client.getQueryData(["bookings", early.date])).toEqual([updated, late]);
+    expect(screen.getAllByRole("listitem").map((row) => row.textContent)).toEqual([
+        "10:15 — 10:45Сохранённые измененияРедактироватьУдалить",
+        "14:00 — 15:00Без названияРедактироватьУдалить",
+    ]);
+    expect(screen.queryByText("Планирование")).toBeNull();
+    editBooking(updated.title);
+    expect(formValues()).toEqual({ date: updated.date, title: updated.title, start: updated.start, end: updated.end });
+    expect(screen.getByRole("alert").textContent).toContain("Не удалось обновить список бронирований.");
+    expect(readDates).toEqual([early.date, early.date]);
 });
 
 function clickDelete(title = "Планирование") {

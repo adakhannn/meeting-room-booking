@@ -21,7 +21,12 @@ export function useCreateBooking() {
     return useMutation({
         mutationFn: createBooking,
         retry: false,
-        onSuccess: (_booking, input) => queryClient.invalidateQueries({ queryKey: ["bookings", input.date], exact: true }),
+        onSuccess: async (booking) => {
+            const queryKey = ["bookings", booking.date];
+            queryClient.setQueryData<Booking[]>(queryKey, (current = []) =>
+                sortByStart([...current.filter((item) => item.id !== booking.id), booking]));
+            await queryClient.invalidateQueries({ queryKey, exact: true });
+        },
         onError: (error, input) => {
             if (error instanceof BookingApiError && error.status === 409) {
                 return queryClient.invalidateQueries({ queryKey: ["bookings", input.date], exact: true });
@@ -35,7 +40,12 @@ export function useUpdateBooking() {
     return useMutation({
         mutationFn: ({ id, input }: { id: string; input: BookingInput }) => updateBooking(id, input),
         retry: false,
-        onSuccess: (_booking, { input }) => queryClient.invalidateQueries({ queryKey: ["bookings", input.date], exact: true }),
+        onSuccess: async (booking) => {
+            const queryKey = ["bookings", booking.date];
+            queryClient.setQueryData<Booking[]>(queryKey, (current = []) =>
+                sortByStart([...current.filter((item) => item.id !== booking.id), booking]));
+            await queryClient.invalidateQueries({ queryKey, exact: true });
+        },
         onError: (error, { input }) => {
             if (error instanceof BookingApiError && error.status === 409) {
                 return queryClient.invalidateQueries({ queryKey: ["bookings", input.date], exact: true });
