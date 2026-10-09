@@ -10,6 +10,7 @@ import { BookingApiError, createBooking, deleteBooking, getBookings, updateBooki
 import type { BookingInput } from "../src/features/bookings/types.ts";
 import { createBookingHandlers } from "../src/mocks/handlers.ts";
 import { createBookingStore } from "../src/mocks/bookings-store.ts";
+import { demoScenarios } from "../src/demo/scenarios.ts";
 
 const endpoint = "http://localhost/api/bookings";
 const now = new Date(2026, 9, 9, 0, 30);
@@ -31,6 +32,7 @@ beforeAll(() => {
     server.listen({ onUnhandledRequest: "error" });
 });
 beforeEach(() => {
+    demoScenarios.setConflictOnNextSave(false);
     vi.spyOn(window, "confirm").mockReturnValue(false);
     writeRequests = [];
     readDates = [];
@@ -42,7 +44,7 @@ beforeEach(() => {
     store.save(early);
     store.save(tomorrow);
     store.save(yesterday);
-    server.resetHandlers(...createBookingHandlers({ store, now: () => now, baseUrl: "http://localhost" }));
+    server.resetHandlers(...createBookingHandlers({ store, now: () => now, baseUrl: "http://localhost", scenarios: demoScenarios }));
 });
 afterEach(() => {
     cleanup();
@@ -434,7 +436,7 @@ test("refreshes the selected date on 409, preserves the form and uses fresh book
     store.save({ id: "concurrent", date: tomorrow.date, start: "09:00", end: "10:00", title: "Занято другим участником" });
     await submitForm();
     await screen.findByText("Занято другим участником");
-    expect((await screen.findByRole("alert")).textContent).toBe("Это время пересекается с другим бронированием.");
+    expect((await screen.findByRole("alert")).textContent).toBe("Это время уже заняли. Список обновлён — выберите другой интервал");
     expect(Object.fromEntries(new FormData(screen.getByRole("form") as HTMLFormElement)))
         .toEqual({ date: tomorrow.date, title: "Встреча команды", start: "09:15", end: "09:45" });
     expect((screen.getByLabelText("Дата") as HTMLInputElement).disabled).toBe(false);
@@ -457,7 +459,7 @@ test("a failed list refresh after successful POST does not report a save failure
     server.use(http.get(endpoint, () => new HttpResponse(null, { status: 503 })));
     fillForm("10:15", "10:45");
     await submitForm();
-    expect((await screen.findByRole("alert")).textContent).toContain("Не удалось загрузить бронирования.");
+    expect((await screen.findByRole("alert")).textContent).toContain("Не удалось обновить список бронирований.");
     await waitFor(() => expect((screen.getByLabelText(/Название/) as HTMLInputElement).value).toBe(""));
     expect((screen.getByLabelText("Время начала") as HTMLInputElement).value).toBe("");
     expect((screen.getByLabelText("Время окончания") as HTMLInputElement).value).toBe("");
@@ -670,7 +672,7 @@ test("PATCH conflict refreshes the edited day's bookings without replacing the d
     store.save({ ...tomorrow, title: "Название на сервере" });
     await submitForm();
     await screen.findByText("Время уже занято");
-    expect((await screen.findByRole("alert")).textContent).toBe("Это время пересекается с другим бронированием.");
+    expect((await screen.findByRole("alert")).textContent).toBe("Это время уже заняли. Список обновлён — выберите другой интервал");
     expect(formValues()).toEqual({ date: tomorrow.date, title: "Мои исправления", start: "10:15", end: "10:45" });
     expect(screen.getByRole("form", { name: "Редактирование бронирования" })).toBeDefined();
     expect(readDates).toEqual([early.date, tomorrow.date, tomorrow.date]);
@@ -695,7 +697,7 @@ test("successful PATCH exits editing even if the following list refresh fails", 
     server.use(http.get(endpoint, () => new HttpResponse(null, { status: 503 })));
     await submitForm();
     await screen.findByRole("form", { name: "Новое бронирование" });
-    expect(screen.getByRole("alert").textContent).toContain("Не удалось загрузить бронирования.");
+    expect(screen.getByRole("alert").textContent).toContain("Не удалось обновить список бронирований.");
     expect(formValues()).toEqual({ date: early.date, title: "", start: "", end: "" });
     expect(store.get(early.id)?.title).toBe("Сохранённые изменения");
     expect(writeRequests).toEqual(["PATCH"]);
@@ -705,6 +707,76 @@ function clickDelete(title = "Планирование") {
     const row = screen.getByText(title).closest("li")!;
     fireEvent.click(within(row).getByRole("button", { name: "Удалить" }));
 }
+
+test.each([false, true])("demo conflict runs once after valid submission and preserves fields and mode (editing: %s)", async (editing) => {
+    showPage();
+    await screen.findByText("Планирование");
+    const summary = screen.getByText("Демо-сценарии");
+    const details = summary.closest("details")!;
+    expect(details.open).toBe(false);
+    fireEvent.click(summary);
+    expect(details.open).toBe(true);
+    const toggle = screen.getByRole("switch", { name: "Конфликт при следующем сохранении" }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    fireEvent.click(toggle);
+    expect(toggle.checked).toBe(true);
+    if (editing) editBooking();
+
+    // Client validation must not send a request or consume the scenario.
+    fillForm("10:15", "10:29", "Мой черновик");
+    await submitForm();
+    expect((await screen.findByRole("alert")).textContent).toBe("Минимальная длительность бронирования — 30 минут.");
+    expect(writeRequests).toEqual([]);
+    expect(toggle.checked).toBe(true);
+    fillForm("14:15", "14:45", "Мой черновик");
+    await submitForm();
+    expect((await screen.findByRole("alert")).textContent).toBe("Это время пересекается с другим бронированием.");
+    expect(writeRequests).toEqual([]);
+    expect(toggle.checked).toBe(true);
+
+    fillForm("10:15", "10:45", "Мой черновик");
+    await submitForm();
+    await screen.findByText("Бронь другого участника");
+    expect((await screen.findByRole("alert")).textContent).toBe("Это время уже заняли. Список обновлён — выберите другой интервал");
+    expect(client.getMutationCache().getAll().at(-1)?.state.error).toMatchObject({ status: 409, code: "conflict" });
+    expect(formValues()).toEqual({ date: early.date, title: "Мой черновик", start: "10:15", end: "10:45" });
+    expect(screen.getByRole("form", { name: editing ? "Редактирование бронирования" : "Новое бронирование" })).toBeDefined();
+    expect(toggle.checked).toBe(false);
+    expect(store.get(early.id)).toEqual(early);
+    expect(store.list()).toHaveLength(5);
+    expect(store.list()).toContainEqual(expect.objectContaining({ date: early.date, start: "10:15", end: "10:45", title: "Бронь другого участника" }));
+    expect(readDates).toEqual([early.date, early.date]);
+    const method = editing ? "PATCH" : "POST";
+    expect(writeRequests).toEqual([method]);
+
+    // The refreshed list now blocks the conflicting draft locally.
+    await submitForm();
+    expect(writeRequests).toEqual([method]);
+    fillForm("11:00", "11:30", "Мой черновик");
+    await submitForm();
+    await screen.findByText("Мой черновик");
+    await waitFor(() => expect(formValues().title).toBe(""));
+    expect(screen.getByRole("form", { name: "Новое бронирование" })).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(writeRequests).toEqual([method, method]);
+    expect(store.list().filter((booking) => booking.title === "Бронь другого участника")).toHaveLength(1);
+});
+
+test("turning the demo switch off cancels the scenario", async () => {
+    showPage();
+    await screen.findByText("Планирование");
+    fireEvent.click(screen.getByText("Демо-сценарии"));
+    const toggle = screen.getByRole("switch", { name: "Конфликт при следующем сохранении" });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    fillForm("10:15", "10:45");
+    await submitForm();
+    await screen.findByText("Встреча команды");
+    await waitFor(() => expect(formValues().title).toBe(""));
+    expect(screen.queryByText("Бронь другого участника")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(writeRequests).toEqual(["POST"]);
+});
 
 test("DELETE handles an empty 204 response without reading JSON", async () => {
     const response = new Response(null, { status: 204 });
@@ -849,9 +921,61 @@ test("a successful deletion stays removed and closes its editor if list refresh 
     server.use(http.get(endpoint, () => new HttpResponse(null, { status: 503 })));
     clickDelete();
     await screen.findByRole("form", { name: "Новое бронирование" });
-    expect(screen.getByRole("alert").textContent).toContain("Не удалось загрузить бронирования.");
+    expect(screen.getByRole("alert").textContent).toContain("Не удалось обновить список бронирований.");
     expect(screen.queryByText("Планирование")).toBeNull();
     expect(store.get(early.id)).toBeUndefined();
     expect(writeRequests).toEqual(["DELETE"]);
     expect(screen.getByText("Без названия")).toBeDefined();
+});
+
+test.each([false, true])("409 reports a failed refresh separately, retains the draft and allows saving after recovery (editing: %s)", async (editing) => {
+    showPage();
+    await screen.findByText("Планирование");
+    if (editing) editBooking();
+    fireEvent.click(screen.getByText("Демо-сценарии"));
+    fireEvent.click(screen.getByRole("switch", { name: "Конфликт при следующем сохранении" }));
+    fillForm("10:15", "10:45", "Мои изменения");
+    let resolveRefresh!: () => void;
+    const pendingRefresh = new Promise<void>((done) => { resolveRefresh = done; });
+    server.use(http.get(endpoint, async () => {
+        await pendingRefresh;
+        return new HttpResponse(null, { status: 503 });
+    }));
+    await submitForm();
+    await screen.findByText("Обновление бронирований…");
+    expect(screen.queryByText(/Список обновлён/)).toBeNull();
+    resolveRefresh();
+    const conflict = await screen.findByText("Это время уже заняли. Выберите другой интервал.");
+    expect(conflict.getAttribute("role")).toBe("alert");
+    expect(screen.getByLabelText("Время начала").getAttribute("aria-describedby")).toBe(conflict.id);
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    expect(screen.getByText("Не удалось обновить список бронирований. Попробуйте ещё раз.")).toBeDefined();
+    expect(screen.queryByText(/Список обновлён/)).toBeNull();
+    expect(screen.queryByText("Бронь другого участника")).toBeNull();
+    expect(formValues()).toEqual({ date: early.date, title: "Мои изменения", start: "10:15", end: "10:45" });
+    const formName = editing ? "Редактирование бронирования" : "Новое бронирование";
+    expect(screen.getByRole("form", { name: formName })).toBeDefined();
+    expect(store.get(early.id)).toEqual(early);
+    const method = editing ? "PATCH" : "POST";
+    expect(writeRequests).toEqual([method]);
+
+    // Saving remains blocked until the list has been refreshed successfully.
+    expect((screen.getByRole("button", { name: editing ? "Сохранить" : "Забронировать" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: editing ? "Сохранить" : "Забронировать" }));
+    expect(writeRequests).toEqual([method]);
+    server.resetHandlers(...createBookingHandlers({ store, now: () => now, baseUrl: "http://localhost", scenarios: demoScenarios }));
+    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+    await screen.findByText("Бронь другого участника");
+    expect(screen.queryByText("Не удалось обновить список бронирований. Попробуйте ещё раз.")).toBeNull();
+    expect((await screen.findByRole("alert")).textContent).toBe("Это время уже заняли. Список обновлён — выберите другой интервал");
+    expect(formValues()).toEqual({ date: early.date, title: "Мои изменения", start: "10:15", end: "10:45" });
+    expect(screen.getByRole("form", { name: formName })).toBeDefined();
+    fillForm("11:00", "11:30", "Мои изменения");
+    await submitForm();
+    await screen.findByText("Мои изменения");
+    await waitFor(() => expect(formValues().title).toBe(""));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("form", { name: "Новое бронирование" })).toBeDefined();
+    expect(writeRequests).toEqual([method, method]);
+    expect(store.list()).toContainEqual(expect.objectContaining({ title: "Мои изменения", start: "11:00", end: "11:30" }));
 });

@@ -4,13 +4,14 @@ import { BookingForm } from "./BookingForm.tsx";
 import { useBookings, useCreateBooking, useDeleteBooking, useUpdateBooking } from "./queries.ts";
 import { formatLocalDate, isValidDate } from "./time.ts";
 import type { Booking, BookingInput } from "./types.ts";
+import { DemoScenarios } from "../../demo/DemoScenarios.tsx";
 
 export function BookingsPage() {
     const [date, setDate] = useState(() => formatLocalDate(new Date()));
     // Keep a snapshot so list refreshes do not replace the user's draft.
     const [editingBooking, setEditingBooking] = useState<Booking>();
     const validDate = isValidDate(date);
-    const { data: bookings, isPending, isFetching, isError, error, refetch } = useBookings(date);
+    const { data: bookings, isPending, isFetching, isError, isRefetchError, error, refetch } = useBookings(date);
     const creation = useCreateBooking();
     const update = useUpdateBooking();
     const deletion = useDeleteBooking();
@@ -18,6 +19,7 @@ export function BookingsPage() {
     const isBusy = isSaving || deletion.isPending;
     // Protect against multiple actions before mutation state has re-rendered the UI.
     const mutationInFlight = useRef(false);
+    const editTrigger = useRef<HTMLButtonElement | null>(null);
 
     async function saveBooking(input: BookingInput) {
         if (mutationInFlight.current) return;
@@ -60,6 +62,8 @@ export function BookingsPage() {
                 </p>
             </header>
 
+            <DemoScenarios disabled={isBusy} />
+
             <div className="grid items-start gap-5 md:grid-cols-[250px_minmax(0,1fr)] md:gap-6">
                 <section className="min-w-0 rounded-2xl border border-frame bg-white p-5 shadow-sm sm:p-6" aria-label="Выбор даты">
                     <div className="flex flex-col gap-3">
@@ -93,7 +97,11 @@ export function BookingsPage() {
                         isDeleting={deletion.isPending}
                         booking={editingBooking}
                         onSave={saveBooking}
-                        onCancel={() => { if (!isBusy && !mutationInFlight.current) setEditingBooking(undefined); }}
+                        onCancel={() => {
+                            if (isBusy || mutationInFlight.current) return;
+                            setEditingBooking(undefined);
+                            editTrigger.current?.focus();
+                        }}
                     />
                     <section className="min-w-0 rounded-2xl border border-frame bg-white shadow-sm" aria-labelledby="bookings-heading">
                         <div className="border-b border-divider px-5 py-5 sm:px-6">
@@ -112,7 +120,9 @@ export function BookingsPage() {
                                 )}
                                 {isError && (
                                     <div className="m-5 rounded-xl border border-error-border bg-error-surface p-5 text-sm leading-relaxed text-error sm:m-6" role="alert">
-                                        <p className="mb-3">{error instanceof BookingApiError ? error.message : "Не удалось загрузить бронирования. Проверьте соединение и попробуйте ещё раз."}</p>
+                                        <p className="mb-3">{isRefetchError
+                                            ? "Не удалось обновить список бронирований. Попробуйте ещё раз."
+                                            : error instanceof BookingApiError ? error.message : "Не удалось загрузить бронирования. Проверьте соединение и попробуйте ещё раз."}</p>
                                         <button
                                             className="min-h-11 cursor-pointer rounded-lg bg-accent px-4 py-2 font-semibold text-white transition-colors hover:bg-accent-strong focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-focus disabled:cursor-wait disabled:opacity-65"
                                             type="button"
@@ -150,7 +160,11 @@ export function BookingsPage() {
                                                         type="button"
                                                         disabled={isBusy}
                                                         aria-pressed={editingBooking?.id === booking.id}
-                                                        onClick={() => { if (!isBusy && !mutationInFlight.current) setEditingBooking(booking); }}
+                                                        onClick={(event) => {
+                                                            if (isBusy || mutationInFlight.current) return;
+                                                            editTrigger.current = event.currentTarget;
+                                                            setEditingBooking(booking);
+                                                        }}
                                                         className="min-h-11 shrink-0 cursor-pointer rounded-lg border border-input px-3 py-2 text-sm font-semibold text-accent-strong transition-colors hover:bg-accent-soft focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-50"
                                                     >
                                                         Редактировать

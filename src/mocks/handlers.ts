@@ -4,6 +4,7 @@ import { isValidDate } from "../features/bookings/time.ts";
 import { validateBooking } from "../features/bookings/validation.ts";
 import type { BookingValidationError } from "../features/bookings/validation.ts";
 import type { BookingStore } from "./bookings-store.ts";
+import { createDemoScenarios } from "../demo/scenarios.ts";
 
 type ApiError = {
     code: BookingValidationError["code"] | "invalid_json" | "invalid_input" | "not_found";
@@ -61,7 +62,8 @@ export function createBookingHandlers({
     store,
     now = () => new Date(),
     baseUrl = "",
-}: { store: BookingStore; now?: () => Date; baseUrl?: string }) {
+    scenarios = createDemoScenarios(),
+}: { store: BookingStore; now?: () => Date; baseUrl?: string; scenarios?: ReturnType<typeof createDemoScenarios> }) {
     const endpoint = `${baseUrl}/api/bookings`;
 
     function validate(input: BookingInput, excludeBookingId?: string) {
@@ -70,6 +72,21 @@ export function createBookingHandlers({
             const { code, field, message } = result;
             return errorResponse({ code, field, message }, code === "conflict" ? 409 : 400);
         }
+    }
+
+    function simulateConflict(input: BookingInput) {
+        // Consume only after JSON, fields and booking rules have passed validation.
+        if (!scenarios.consumeConflict()) return;
+        store.save({
+            id: crypto.randomUUID(),
+            date: input.date,
+            start: input.start,
+            end: input.end,
+            title: "Бронь другого участника",
+        });
+        return errorResponse({
+            code: "conflict", field: "start", message: "Это время пересекается с другим бронированием.",
+        }, 409);
     }
 
     return [
@@ -96,6 +113,8 @@ export function createBookingHandlers({
             const input = parsed.data as BookingInput;
             const error = validate(input);
             if (error) return error;
+            const conflict = simulateConflict(input);
+            if (conflict) return conflict;
 
             const booking: Booking = { ...input, id: crypto.randomUUID() };
             store.save(booking);
@@ -112,6 +131,8 @@ export function createBookingHandlers({
             const booking: Booking = { ...current, ...parsed.data };
             const error = validate(booking, id);
             if (error) return error;
+            const conflict = simulateConflict(booking);
+            if (conflict) return conflict;
 
             store.save(booking);
             return HttpResponse.json(booking);

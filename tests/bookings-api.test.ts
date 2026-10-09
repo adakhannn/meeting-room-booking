@@ -3,6 +3,7 @@ import { setupServer } from "msw/node";
 import { createBookingHandlers } from "../src/mocks/handlers.ts";
 import { createBookingStore } from "../src/mocks/bookings-store.ts";
 import type { Booking, BookingInput } from "../src/features/bookings/types.ts";
+import { createDemoScenarios } from "../src/demo/scenarios.ts";
 
 const baseUrl = "http://localhost";
 const endpoint = `${baseUrl}/api/bookings`;
@@ -41,6 +42,65 @@ async function list(date = input.date): Promise<Booking[]> {
     expect(response.status).toBe(200);
     return response.json() as Promise<Booking[]>;
 }
+
+test("invalid requests and existing conflicts do not consume the demo scenario or mutate the store", async () => {
+    const scenarios = createDemoScenarios();
+    server.resetHandlers(...createBookingHandlers({ store, baseUrl, now: () => now, scenarios }));
+    const existing = await create();
+    scenarios.setConflictOnNextSave(true);
+    const before = store.list();
+    const invalidJson = await fetch(endpoint, { method: "POST", body: "{" });
+    expect(invalidJson.status).toBe(400);
+    expect((await write("POST", { ...input, start: 10 })).status).toBe(400);
+    expect((await write("POST", { ...input, date: "2026-02-30" })).status).toBe(400);
+    expect((await write("POST", { ...input, end: "10:29" })).status).toBe(400);
+    expect((await write("POST", input)).status).toBe(409);
+    expect((await write("PATCH", { title: "Новая встреча" }, "missing")).status).toBe(404);
+    expect((await write("PATCH", { end: "10:29" }, existing.id)).status).toBe(400);
+    expect(scenarios.getConflictOnNextSave()).toBe(true);
+    expect(store.list()).toEqual(before);
+
+    // Reads and deletions also leave the next-save scenario armed.
+    expect(await list()).toEqual(before);
+    expect((await fetch(`${endpoint}/${existing.id}`, { method: "DELETE" })).status).toBe(204);
+    expect(scenarios.getConflictOnNextSave()).toBe(true);
+    const conflict = await write("POST", input);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "conflict", field: "start" });
+    expect(scenarios.getConflictOnNextSave()).toBe(false);
+    expect(await list()).toEqual([expect.objectContaining({ ...input, title: "Бронь другого участника" })]);
+});
+
+test("demo PATCH validates merged fields, preserves the original booking and adds the other booking once", async () => {
+    const scenarios = createDemoScenarios();
+    server.resetHandlers(...createBookingHandlers({ store, baseUrl, now: () => now, scenarios }));
+    const original = await create();
+    scenarios.setConflictOnNextSave(true);
+    const response = await write("PATCH", { start: "11:15", end: "11:45" }, original.id);
+    expect(response.status).toBe(409);
+    expect(store.get(original.id)).toEqual(original);
+    expect(await list()).toEqual([
+        original,
+        expect.objectContaining({ date: original.date, start: "11:15", end: "11:45", title: "Бронь другого участника" }),
+    ]);
+    expect(scenarios.getConflictOnNextSave()).toBe(false);
+    expect((await write("PATCH", { title: "Обновлено" }, original.id)).status).toBe(200);
+    expect(store.list()).toHaveLength(2);
+});
+
+test("only one of concurrent valid saves consumes the demo conflict", async () => {
+    const scenarios = createDemoScenarios();
+    server.resetHandlers(...createBookingHandlers({ store, baseUrl, now: () => now, scenarios }));
+    scenarios.setConflictOnNextSave(true);
+    const results = await Promise.all([
+        write("POST", input),
+        write("POST", { ...input, start: "11:00", end: "12:00" }),
+    ]);
+    expect(results.map((response) => response.status).sort()).toEqual([201, 409]);
+    expect(store.list()).toHaveLength(2);
+    expect(store.list().filter((booking) => booking.title === "Бронь другого участника")).toHaveLength(1);
+    expect(scenarios.getConflictOnNextSave()).toBe(false);
+});
 
 test("completes a CRUD lifecycle and rejects operations on the deleted booking", async () => {
     const booking = await create();

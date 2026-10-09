@@ -23,9 +23,13 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
     const isBusy = isSaving || isDeleting;
     const [today, setToday] = useState(() => formatLocalDate(new Date()));
     const requestInFlight = useRef(false);
-    const { register, setValue, handleSubmit, setError, clearErrors, reset, formState: { errors, isSubmitting } } = useForm<BookingInput>({
+    const { register, setValue, setFocus, handleSubmit, setError, clearErrors, reset, formState: { errors, isSubmitting } } = useForm<BookingInput>({
         defaultValues: { date, title: booking?.title ?? "", start: booking?.start ?? "", end: booking?.end ?? "" },
     });
+
+    useEffect(() => {
+        if (booking?.id) setFocus("title");
+    }, [booking?.id, setFocus]);
 
     useEffect(() => {
         setValue("date", date);
@@ -59,6 +63,16 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
               ? "Дождитесь загрузки списка бронирований."
               : undefined;
 
+    // Keep server conflicts distinct from local validation, and only claim a refresh
+    // succeeded when the list is available. This also updates after a manual retry.
+    const startErrorMessage = errors.start?.type === "server_conflict"
+        ? isError
+            ? "Это время уже заняли. Выберите другой интервал."
+            : isLoading
+                ? "Это время уже заняли. Дождитесь обновления списка."
+                : "Это время уже заняли. Список обновлён — выберите другой интервал"
+        : errors.start?.message;
+
     async function onSubmit(values: BookingInput) {
         const now = new Date();
         setToday(formatLocalDate(now));
@@ -81,6 +95,10 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
             if (saved) reset({ date, title: "", start: "", end: "" });
         } catch (error) {
             const apiError = error instanceof BookingApiError ? error : undefined;
+            if (apiError?.status === 409) {
+                setError("start", { type: "server_conflict", message: "Это время уже заняли." });
+                return;
+            }
             setError(apiError?.field ?? "root.server", {
                 type: apiError?.code ?? "server",
                 message: apiError?.message ?? "Не удалось сохранить бронирование. Проверьте соединение и попробуйте ещё раз.",
@@ -136,7 +154,7 @@ export function BookingForm({ date, bookings, isLoading, isError, isSaving, isDe
                             aria-describedby={errors.start ? "booking-start-error" : undefined}
                             {...register("start")}
                         />
-                        {errors.start && <p id="booking-start-error" className="text-sm text-error" role="alert">{errors.start.message}</p>}
+                        {errors.start && <p id="booking-start-error" className="text-sm text-error" role="alert">{startErrorMessage}</p>}
                     </div>
                     <div className="flex min-w-0 flex-col gap-2">
                         <label htmlFor="booking-end" className="text-sm font-semibold">Время окончания</label>
